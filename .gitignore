@@ -37,3 +37,12 @@ Thumbs.db
 # Docker
 .docker/
 docker-compose.override.yml
+
+# Storage/Uploads - WICHTIG!
+storage/uploads/
+storage/temp/
+
+# Secrets
+.env.production
+*.key
+*.pem
