@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Digital Signage - Display</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #000;
+      overflow: hidden;
+      font-family: Arial, sans-serif;
+    }
+
+    #content-container {
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .content-item {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: none;
+    }
+
+    .content-item.active {
+      display: block;
+    }
+
+    #status {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      backdrop-filter: blur(10px);
+    }
+
+    #status.connected {
+      background: rgba(34, 197, 94, 0.3);
+    }
+
+    #status.disconnected {
+      background: rgba(239, 68, 68, 0.3);
+    }
+
+    .loading {
+      color: white;
+      font-size: 24px;
+      text-align: center;
+    }
+
+    #debug {
+      position: fixed;
+      bottom: 10px;
+      left: 10px;
+      background: rgba(0, 0, 0, 0.7);
+      color: #00ff00;
+      padding: 10px;
+      border-radius: 5px;
+      font-family: monospace;
+      font-size: 11px;
+      max-width: 300px;
+      max-height: 150px;
+      overflow-y: auto;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="status" class="disconnected">Disconnected</div>
+  <div id="debug"></div>
+  <div id="content-container">
+    <div class="loading">Connecting to server...</div>
+  </div>
+
+  <script>
+    const DEBUG = false; // Set to true for debugging
+
+    // Get screen name from URL parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    let screenName = urlParams.get('id') || urlParams.get('screen');
+    
+    if (!screenName) {
+      screenName = prompt('Enter screen name:') || 'Screen01';
+    }
+
+    const statusEl = document.getElementById('status');
+    const containerEl = document.getElementById('content-container');
+    const debugEl = document.getElementById('debug');
+
+    let ws = null;
+    let currentPlaylist = null;
+    let currentIndex = 0;
+    let playInterval = null;
+    let isPaused = false;
+
+    function log(message) {
+      console.log(`[Display] ${message}`);
+      if (DEBUG) {
+        const lines = debugEl.innerHTML.split('<br>');
+        if (lines.length > 10) lines.shift();
+        debugEl.innerHTML = lines.join('<br>') + `<br>${message}`;
+        debugEl.style.display = 'block';
+      }
+    }
+
+    // WebSocket connection
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws/screen/${screenName}`;
+      
+      log(`Connecting to: ${wsUrl}`);
+      ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        log('Connected to server');
+        statusEl.textContent = `Connected: ${screenName}`;
+        statusEl.className = 'connected';
+      };
+
+      ws.onmessage = (event) => {
+        const message = JSON.parse(event.data);
+        log(`Message received: ${message.type}`);
+        handleMessage(message);
+      };
+
+      ws.onclose = () => {
+        log('Disconnected from server');
+        statusEl.textContent = 'Disconnected';
+        statusEl.className = 'disconnected';
+        
+        // Reconnect after 5 seconds
+        setTimeout(connect, 5000);
+      };
+
+      ws.onerror = (error) => {
+        log(`WebSocket error: ${error}`);
+      };
+    }
+
+    function handleMessage(message) {
+      if (message.type === 'ping') {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      } else if (message.type === 'playlist_update') {
+        loadPlaylist(message.playlist);
+      }
+    }
+
+    function loadPlaylist(playlist) {
+      log(`Loading playlist with ${playlist.items.length} items`);
+      currentPlaylist = playlist;
+      currentIndex = 0;
+
+      containerEl.innerHTML = '';
+
+      if (!playlist || !playlist.items || playlist.items.length === 0) {
+        containerEl.innerHTML = '<div class="loading">No content assigned</div>';
+        return;
+      }
+
+      // Create content elements for each CONTENT ITEM (PDF page, image, etc.)
+      playlist.items.forEach((item, index) => {
+        let element;
+        const filePath = item.content.file_path;
+
+        if (item.content.content_type === 'image' || item.content.content_type === 'pdf') {
+          element = document.createElement('img');
+          element.src = filePath;
+          element.loading = 'lazy';
+        } else if (item.content.content_type === 'video') {
+          element = document.createElement('video');
+          element.src = filePath;
+          element.autoplay = false;
+          element.muted = true;
+        }
+
+        element.className = 'content-item';
+        element.dataset.index = index;
+        element.dataset.duration = item.duration * 1000;
+
+        containerEl.appendChild(element);
+      });
+
+      log(`Playlist loaded with ${playlist.items.length} content items`);
+      startPlayback();
+    }
+
+    function startPlayback() {
+      if (playInterval) {
+        clearInterval(playInterval);
+      }
+
+      isPaused = false;
+      showContent(currentIndex);
+    }
+
+    function showContent(index) {
+      const items = containerEl.querySelectorAll('.content-item');
+      if (items.length === 0) return;
+
+      // Hide all
+      items.forEach(item => item.classList.remove('active'));
+
+      // Show current
+      const currentItem = items[index];
+      currentItem.classList.add('active');
+
+      log(`Showing item ${index + 1}/${items.length}`);
+
+      // Handle video
+      if (currentItem.tagName === 'VIDEO') {
+        currentItem.currentTime = 0;
+        currentItem.play();
+      }
+
+      // Schedule next
+      const duration = parseInt(currentItem.dataset.duration);
+      setTimeout(() => {
+        if (!isPaused) {
+          nextContent();
+        }
+      }, duration);
+    }
+
+    function nextContent() {
+      if (!currentPlaylist) return;
+
+      currentIndex++;
+      if (currentIndex >= currentPlaylist.items.length) {
+        if (currentPlaylist.loop) {
+          currentIndex = 0;
+        } else {
+          return;
+        }
+      }
+
+      showContent(currentIndex);
+    }
+
+    function previousContent() {
+      if (!currentPlaylist) return;
+
+      currentIndex--;
+      if (currentIndex < 0) {
+        currentIndex = currentPlaylist.items.length - 1;
+      }
+
+      showContent(currentIndex);
+    }
+
+    function togglePause() {
+      isPaused = !isPaused;
+      log(`${isPaused ? 'Paused' : 'Resumed'}`);
+      
+      const currentItem = containerEl.querySelector('.content-item.active');
+      if (currentItem && currentItem.tagName === 'VIDEO') {
+        if (isPaused) {
+          currentItem.pause();
+        } else {
+          currentItem.play();
+        }
+      }
+
+      if (!isPaused) {
+        nextContent();
+      }
+    }
+
+    // Hotkey controls (K-key)
+    let keyPressTime = 0;
+    let keyTimer = null;
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'k' || e.key === 'K') {
+        if (!keyTimer) {
+          keyPressTime = Date.now();
+          keyTimer = setTimeout(() => {
+            const duration = Date.now() - keyPressTime;
+            
+            if (duration >= 3000) {
+              log('Restarting presentation');
+              currentIndex = 0;
+              startPlayback();
+            }
+            
+            keyTimer = null;
+          }, 3100);
+        }
+      }
+    });
+
+    document.addEventListener('keyup', (e) => {
+      if (e.key === 'k' || e.key === 'K') {
+        if (keyTimer) {
+          clearTimeout(keyTimer);
+          keyTimer = null;
+          
+          const duration = Date.now() - keyPressTime;
+          
+          if (duration < 3000) {
+            if (isPaused) {
+              log('Next slide');
+              nextContent();
+            } else {
+              log('Paused');
+              togglePause();
+            }
+          }
+        }
+      }
+    });
+
+    // Start connection
+    connect();
+  </script>
+</body>
+</html>
